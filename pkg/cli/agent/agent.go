@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/gorilla/mux"
 	"github.com/k3s-io/k3s/pkg/agent"
@@ -103,6 +104,43 @@ func Run(ctx *cli.Context) error {
 		err := vpn.StartVPN(cfg.VPNAuth)
 		if err != nil {
 			return err
+		}
+
+		// search for --node-ip in the extra kubelet args
+		nodeIpIdx := -1
+		for i := range cfg.ExtraKubeletArgs {
+			if strings.Contains(cfg.ExtraKubeletArgs[i], "--node-ip") {
+				logrus.Warning("node-ip is set in extra kubelet args. not overriding with VPN IP")
+				nodeIpIdx = i
+				break
+			}
+		}
+
+		// TODO Maybe there would be a backoff/retry mechanism here? Are we sure the VPN is up?
+		vpnStatus, err := vpn.GetVPNInfo(cfg.VPNAuth)
+		if err != nil {
+			return err
+		}
+
+		var vpnIps []string
+		if !vpnStatus.IPv4Address.IsUnspecified() {
+			vpnIps = append(vpnIps, vpnStatus.IPv4Address.String())
+		}
+		if !vpnStatus.IPv6Address.IsUnspecified() {
+			vpnIps = append(vpnIps, vpnStatus.IPv6Address.String())
+		}
+
+		if len(vpnIps) > 0 {
+			logrus.Infof("Adding vpn IPs to kubelet node-ip arg: %s", strings.Join(vpnIps, ","))
+
+			if nodeIpIdx == -1 { // if there is no existing --node-ip arg, add it
+				cfg.ExtraKubeletArgs = append(cfg.ExtraKubeletArgs, fmt.Sprintf("--node-ip=%s", strings.Join(vpnIps, ",")))
+			} else {
+				// we are assuming that the input is well-formed, and one or more comma-separated vpnIps can be appended
+				cfg.ExtraKubeletArgs[nodeIpIdx] = fmt.Sprintf("%s,%s", cfg.ExtraKubeletArgs[nodeIpIdx], strings.Join(vpnIps, ","))
+			}
+		} else {
+			logrus.Warning("no vpn IPs returned from the vpn backend, nothing to inject")
 		}
 	}
 
